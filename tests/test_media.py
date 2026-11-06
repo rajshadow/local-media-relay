@@ -20,7 +20,7 @@ class MediaTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.folder = Path(self.temp.name)
+        self.folder = Path(self.temp.name).resolve()
         self.root = self.folder / 'media'
         self.root.mkdir()
         self.source = self.root / 'photo.png'
@@ -46,6 +46,12 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(self.manager.request(self.source), cache)
         self.source.write_bytes(b'replaced-image-with-a-different-size')
         self.assertIsNone(self.manager.request(self.source))
+
+    def test_sidecar_lookup_normalizes_source_alias(self):
+        sidecar = self.source.with_name(self.source.name + '.thumb.jpg')
+        sidecar.write_bytes(JPEG)
+        alias = self.source.parent / '..' / self.source.parent.name / self.source.name
+        self.assertEqual(self.manager.request(alias), sidecar)
 
     def test_sidecar_is_reused_but_stale_or_oversized_files_are_ignored(self):
         sidecar = self.source.with_name(self.source.name + '.thumb.jpg')

@@ -55,6 +55,7 @@ class ThumbnailManager:
         return self.cache_dir / f'{digest}.jpg'
 
     def sidecar(self, source):
+        source = source.resolve(strict=True)
         for index, root in enumerate(self.library.roots):
             try:
                 relative = source.relative_to(root)
