@@ -60,11 +60,12 @@ class App:
         history = ttk.LabelFrame(panel, text='Previously seen clients', padding=8)
         history.grid(row=9, columnspan=3, sticky='ew', pady=(12, 0))
         self.clients = ttk.Treeview(
-            history, columns=('ip', 'guess', 'seen'), show='headings', height=5,
+            history, columns=('ip', 'guess', 'activity', 'seen'), show='headings', height=5,
             selectmode='extended',
         )
         for column, label, width in (
-            ('ip', 'IP address', 120), ('guess', 'Device guess', 240), ('seen', 'Last seen', 155),
+            ('ip', 'IP address', 115), ('guess', 'Device guess', 200),
+            ('activity', 'Activity seen', 125), ('seen', 'Last seen', 145),
         ):
             self.clients.heading(column, text=label)
             self.clients.column(column, width=width)
@@ -84,9 +85,9 @@ class App:
         ttk.Entry(history, textvariable=self.reported_client, state='readonly').grid(
             row=3, column=0, columnspan=2, sticky='ew')
         self.history_note = tk.StringVar()
-        ttk.Label(history, textvariable=self.history_note, wraplength=520).grid(
+        ttk.Label(history, textvariable=self.history_note, wraplength=580).grid(
             row=4, column=0, columnspan=2, sticky='w', pady=(5, 0))
-        ttk.Label(history, text='Guesses use client-reported headers. IP addresses can change.').grid(
+        ttk.Label(history, text='Grouped by IP. Device guesses use reported headers; addresses can change.').grid(
             row=5, column=0, columnspan=2, sticky='w')
         self.load_settings()
         self.update_access_controls()
@@ -172,8 +173,8 @@ class App:
             identifier = str(index)
             self.seen_clients[identifier] = client
             seen = datetime.fromtimestamp(client.last_seen).strftime('%Y-%m-%d %H:%M')
-            self.clients.insert('', 'end', iid=identifier, values=(client.address, client.guess, seen))
-        note = f'{len(clients)} client entries from recent log tails (up to {HISTORY_DAYS} days).'
+            self.clients.insert('', 'end', iid=identifier, values=(client.address, client.guess, client.activity, seen))
+        note = f'{len(clients)} addresses from recent log tails (up to {HISTORY_DAYS} days). Media requests do not confirm playback.'
         if unreadable:
             note += f' {unreadable} log files could not be read.'
         if not clients:
@@ -185,7 +186,7 @@ class App:
         selection = self.clients.selection()
         evidence = ''
         if len(selection) == 1:
-            evidence = self.seen_clients[selection[0]].user_agent or '(No User-Agent reported)'
+            evidence = self.seen_clients[selection[0]].evidence
         elif selection:
             evidence = 'Multiple entries selected'
         self.reported_client.set(evidence)

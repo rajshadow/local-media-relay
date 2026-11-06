@@ -29,19 +29,20 @@ class HistoryTests(unittest.TestCase):
         path.write_text('\n'.join(json.dumps(item) for item in events) + '\n', encoding='utf-8')
         return path
 
-    def test_merges_sessions_and_keeps_latest_per_address_and_agent(self):
+    def test_merges_sessions_and_keeps_reports_in_one_row_per_address(self):
         self.write_log([event(timestamp=NOW - 20)], 'first.jsonl')
         self.write_log([
             event(timestamp=NOW - 10), event(timestamp=NOW),
             event(agent='VLC/3'), event(address='192.168.1.21', agent='Quest player'),
         ], 'second.jsonl')
         clients, unreadable = recent_clients(self.logs, NOW)
-        self.assertEqual(len(clients), 3)
+        self.assertEqual(len(clients), 2)
         self.assertEqual(unreadable, 0)
         samsung = next(client for client in clients if 'Samsung' in client.user_agent)
         self.assertEqual(samsung.last_seen, NOW)
         self.assertEqual(samsung.guess, 'Possible Samsung device')
-        self.assertEqual(sum(client.address == '192.168.1.20' for client in clients), 2)
+        self.assertEqual(sum(client.address == '192.168.1.20' for client in clients), 1)
+        self.assertIn('VLC/3', samsung.evidence)
 
     def test_ignores_healthchecks_old_events_and_untrusted_forwarding_headers(self):
         events = [
@@ -64,7 +65,7 @@ class HistoryTests(unittest.TestCase):
             stream.write(json.dumps(event(agent='unknown')) + '\n')
             stream.write('{"ts":')
         clients, _ = recent_clients(self.logs, NOW)
-        self.assertEqual(len(clients), 2)
+        self.assertEqual(len(clients), 1)
 
     def test_oversized_line_is_skipped_and_next_event_is_read(self):
         path = self.logs / 'large.jsonl'
@@ -115,6 +116,37 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(client.guess, 'Unknown device')
         self.assertEqual(device_guess('Mozilla/5.0'), 'Unknown device')
         self.assertEqual(device_guess('DeoVR/1.0'), 'DeoVR player; device unknown')
+
+    def test_tv_without_media_headers_keeps_samsung_hint_and_media_activity(self):
+        self.write_log([
+            event(uri='/dlna/content-directory/control', timestamp=NOW - 10),
+            event(agent='', uri='/media/0/video.mp4', timestamp=NOW),
+        ])
+        clients, _ = recent_clients(self.logs, NOW)
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0].guess, 'Possible Samsung device')
+        self.assertEqual(clients[0].activity, 'Media requested')
+        self.assertEqual(clients[0].last_seen, NOW)
+
+    def test_passive_description_fetches_are_distinct_from_browsing(self):
+        self.write_log([
+            event(agent='DAFUPnP'), event(agent='Microsoft-Windows/10.0 UPnP/1.0'),
+            event(address='192.168.1.21', agent='', uri='/dlna/content-directory/control'),
+        ])
+        clients, _ = recent_clients(self.logs, NOW)
+        windows = next(client for client in clients if client.address == '192.168.1.20')
+        self.assertEqual(windows.guess, 'Possible Windows device')
+        self.assertEqual(windows.activity, 'Description only')
+        self.assertIn('DAFUPnP', windows.evidence)
+        self.assertEqual(clients[1].activity, 'Library request')
+
+    def test_conflicting_device_reports_are_visible_for_a_reused_ip(self):
+        self.write_log([event(), event(agent='Quest player')])
+        clients, _ = recent_clients(self.logs, NOW)
+        self.assertEqual(len(clients), 1)
+        self.assertEqual(clients[0].guess, 'Mixed device reports')
+        self.assertIn('Quest player', clients[0].evidence)
+        self.assertIn('Samsung', clients[0].evidence)
 
     def test_unreadable_files_are_reported_without_discarding_history(self):
         self.write_log([event()])

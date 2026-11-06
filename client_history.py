@@ -20,10 +20,23 @@ class SeenClient:
     address: str
     user_agent: str
     last_seen: float
+    activity: str = 'Description only'
+    reported_agents: tuple[str, ...] = ()
 
     @property
     def guess(self):
+        guesses = {device_guess(agent) for agent in self.reported_agents or (self.user_agent,)}
+        device_guesses = {guess for guess in guesses if guess.startswith('Possible ')}
+        if len(device_guesses) > 1:
+            return 'Mixed device reports'
+        if device_guesses:
+            return next(iter(device_guesses))
         return device_guess(self.user_agent)
+
+    @property
+    def evidence(self):
+        agents = self.reported_agents or ((self.user_agent,) if self.user_agent else ())
+        return ' | '.join(agents) or '(No User-Agent reported)'
 
 
 def device_guess(user_agent):
@@ -37,6 +50,9 @@ def device_guess(user_agent):
         (('xbox',), 'Possible Xbox'),
         (('deovr',), 'DeoVR player; device unknown'),
         (('vlc',), 'VLC player; device unknown'),
+        (('microsoft-windows',), 'Possible Windows device'),
+        (('dafupnp',), 'UPnP discovery client; device unknown'),
+        (('python-urllib',), 'Python HTTP client; device unknown'),
         (('android',), 'Android client; device unknown'),
     ):
         if any(token in agent for token in tokens):
@@ -81,7 +97,37 @@ def client_from_event(event, now):
             if isinstance(value, str):
                 user_agent = ''.join(character for character in value[:512] if character.isprintable())
             break
-    return SeenClient(str(address), user_agent, float(timestamp))
+    activity = 'Other request'
+    if uri.startswith('/media/'):
+        activity = 'Media requested'
+    elif uri.split('?')[0] == '/dlna/content-directory/control':
+        activity = 'Library request'
+    elif uri.startswith('/dlna/thumb/'):
+        activity = 'Preview requested'
+    elif uri.split('?')[0] in (
+        '/dlna/device.xml', '/dlna/content-directory.xml', '/dlna/connection-manager.xml',
+    ):
+        activity = 'Description only'
+    return SeenClient(str(address), user_agent, float(timestamp), activity)
+
+
+def merge_client(prior, current):
+    if prior is None:
+        return current
+    agents = set(prior.reported_agents or ((prior.user_agent,) if prior.user_agent else ()))
+    if current.user_agent:
+        agents.add(current.user_agent)
+    # Keep useful identity reports even when the player's media requests omit
+    # User-Agent. Retain several reports to expose conflicting device hints.
+    ranked = sorted(agents, key=lambda agent: (
+        device_guess(agent).startswith('Possible '),
+        device_guess(agent) != 'Unknown device', agent,
+    ), reverse=True)[:12]
+    activities = ('Other request', 'Description only', 'Preview requested',
+                  'Library request', 'Media requested')
+    activity = max((prior.activity, current.activity), key=activities.index)
+    return SeenClient(current.address, ranked[0] if ranked else '',
+                      max(prior.last_seen, current.last_seen), activity, tuple(ranked))
 
 
 def recent_clients(log_dir, now=None):
@@ -131,10 +177,8 @@ def recent_clients(log_dir, now=None):
                     client = client_from_event(event, now)
                     if client is None:
                         continue
-                    key = client.address, client.user_agent
-                    prior = clients.get(key)
-                    if prior is None or client.last_seen > prior.last_seen:
-                        clients[key] = client
+                    key = client.address
+                    clients[key] = merge_client(clients.get(key), client)
                     if len(clients) > MAX_CLIENTS:
                         oldest = min(clients, key=lambda item: clients[item].last_seen)
                         del clients[oldest]
