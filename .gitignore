@@ -5,3 +5,4 @@ tools/
 logs/
 *.jsonl
 settings.json
+.ruff_cache/
