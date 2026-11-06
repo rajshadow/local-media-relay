@@ -1,15 +1,12 @@
 """DLNA device descriptions, SOAP responses, and media catalog."""
 import base64
+import html
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from threading import Lock
 from urllib.parse import quote
 
-from library import VIDEO_EXTS
-import html
-from threading import Lock
-import xml.etree.ElementTree as ET
-
-
-
+from library import IMAGE_EXTS, VIDEO_EXTS, is_media
 
 DLNA_FEATURES = 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000'
 
@@ -18,6 +15,7 @@ def mime_for(path: Path) -> str:
     return {
         '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mkv': 'video/x-matroska',
         '.webm': 'video/webm', '.mov': 'video/quicktime',
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
     }[path.suffix.lower()]
 
 
@@ -138,6 +136,10 @@ CONTENT_DIRECTORY_SCPD = b'''<?xml version="1.0"?>
     <action><name>GetSystemUpdateID</name><argumentList>
       <argument><name>Id</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument>
     </argumentList></action>
+    <action><name>X_SetBookmark</name><argumentList>
+      <argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument>
+      <argument><name>PosSecond</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_PosSecond</relatedStateVariable></argument>
+    </argumentList></action>
   </actionList>
   <serviceStateTable>
     <stateVariable sendEvents="no"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable>
@@ -151,6 +153,7 @@ CONTENT_DIRECTORY_SCPD = b'''<?xml version="1.0"?>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable>
+    <stateVariable sendEvents="no"><name>A_ARG_TYPE_PosSecond</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable>
   </serviceStateTable>
 </scpd>'''
@@ -199,7 +202,9 @@ def connection_manager_action(action: str, body: bytes) -> tuple[int, bytes]:
             f'http-get:*:video/mp4:{DLNA_FEATURES},'
             f'http-get:*:video/x-matroska:{DLNA_FEATURES},'
             f'http-get:*:video/webm:{DLNA_FEATURES},'
-            f'http-get:*:video/quicktime:{DLNA_FEATURES}'
+            f'http-get:*:video/quicktime:{DLNA_FEATURES},'
+            f'http-get:*:image/jpeg:{DLNA_FEATURES},'
+            f'http-get:*:image/png:{DLNA_FEATURES}'
         )
         return 200, soap_response(action, f'<Source>{source}</Source><Sink></Sink>', 'ConnectionManager')
     if action == 'GetCurrentConnectionIDs':
@@ -225,9 +230,18 @@ def token(key):
     return base64.urlsafe_b64encode(key.encode()).decode().rstrip('=') if key else '0'
 
 
+def key_for_id(identifier):
+    if identifier == '0':
+        return ''
+    return base64.b64decode(identifier + '=' * (-len(identifier) % 4),
+                            altchars=b'-_', validate=True).decode()
+
+
 class ContentDirectory:
-    def __init__(self, library, base, boot_id):
+    def __init__(self, library, base, boot_id, thumbnails=None, checkpoints=None):
         self.library = library
+        self.thumbnails = thumbnails
+        self.checkpoints = checkpoints
         self.base = base
         self.update_id = boot_id & 0xffffffff
         self.catalog_lock = Lock()
@@ -266,7 +280,7 @@ class ContentDirectory:
     def media_url(self, key):
         return f'{self.base}/media/{quote(key)}'
 
-    def didl(self, key):
+    def didl(self, key, client=''):
         identifier = token(key)
         parent = token(key.rpartition('/')[0]) if key else '-1'
         title = html.escape(self.library.title(key))
@@ -275,15 +289,27 @@ class ContentDirectory:
                     f'<dc:title>{title}</dc:title><upnp:class>object.container.storageFolder</upnp:class>'
                     '</container>')
         path = self.library.path(key)
-        if not path.is_file() or path.suffix.lower() not in VIDEO_EXTS:
+        if not path.is_file() or not is_media(path):
             raise ValueError('Unsupported file')
         url = html.escape(self.media_url(key))
         protocol = html.escape(protocol_info(path), quote=True)
+        media_class = 'imageItem.photo' if path.suffix.lower() in IMAGE_EXTS else 'videoItem'
+        bookmark = ''
+        if self.checkpoints is not None and client and path.suffix.lower() in VIDEO_EXTS:
+            position = round(self.checkpoints.get(path, client) * 1000)
+            folder = html.escape(path.stem.replace(',', ' '))
+            bookmark = f'<sec:dcmInfo>CREATIONDATE=0,FOLDER={folder},BM={position}</sec:dcmInfo>'
+        artwork = ''
+        if self.thumbnails is not None:
+            thumbnail = self.thumbnails.request(path)
+            if thumbnail is not None or self.thumbnails.ffmpeg:
+                artwork = (f'<upnp:albumArtURI>{html.escape(self.base)}/dlna/thumb/{identifier}.jpg'
+                           '</upnp:albumArtURI>')
         return (f'<item id="{identifier}" parentID="{parent}" restricted="1">'
-                f'<dc:title>{title}</dc:title><upnp:class>object.item.videoItem</upnp:class>'
+                f'<dc:title>{title}</dc:title><upnp:class>object.item.{media_class}</upnp:class>{artwork}{bookmark}'
                 f'<res protocolInfo="{protocol}" size="{path.stat().st_size}">{url}</res></item>')
 
-    def content_action(self, action, body):
+    def content_action(self, action, body, client=''):
         service = 'ContentDirectory'
         simple = {
             'GetSearchCapabilities': '<SearchCaps></SearchCaps>',
@@ -293,24 +319,40 @@ class ContentDirectory:
             return 200, soap_response(action, f'<Id>{self.catalog_update()}</Id>', service)
         if action in simple:
             return 200, soap_response(action, simple[action], service)
+        if action == 'X_SetBookmark' and self.checkpoints is not None and client:
+            try:
+                root = ET.fromstring(body)
+                key = key_for_id(soap_value(root, 'ObjectID'))
+                path = self.library.path(key)
+                if path is None or not path.is_file() or path.suffix.lower() not in VIDEO_EXTS:
+                    return 500, soap_fault(701, 'No such object')
+                seconds = float(soap_value(root, 'PosSecond')) / 1000
+                changed = self.checkpoints.set(path, client, seconds)
+            except (ValueError, ET.ParseError):
+                return 500, soap_fault(402, 'Invalid arguments')
+            except OSError:
+                return 500, soap_fault(501, 'Checkpoint could not be saved')
+            if changed:
+                with self.catalog_lock:
+                    self.update_id = (self.update_id + 1) & 0xffffffff
+            return 200, soap_response(action, '', service)
         if action != 'Browse':
             return 500, soap_fault(401, 'Invalid action')
         try:
             root = ET.fromstring(body)
             object_id = soap_value(root, 'ObjectID', '0')
-            key = '' if object_id == '0' else base64.urlsafe_b64decode(
-                object_id + '=' * (-len(object_id) % 4)).decode()
+            key = key_for_id(object_id)
             flag = soap_value(root, 'BrowseFlag')
             update_id = self.catalog_update(key if key and flag == 'BrowseDirectChildren' else None)
             if flag == 'BrowseMetadata':
-                entries = [self.didl(key)]
+                entries = [self.didl(key, client)]
                 total = 1
             elif flag == 'BrowseDirectChildren':
                 start = max(0, int(soap_value(root, 'StartingIndex', '0')))
                 count = max(0, int(soap_value(root, 'RequestedCount', '0')))
                 children = self.library.children(key)
                 total = len(children)
-                entries = [self.didl(child) for child in children[start:start + count if count else None]]
+                entries = [self.didl(child, client) for child in children[start:start + count if count else None]]
             else:
                 return 500, soap_fault(402, 'Invalid arguments')
         except (ValueError, OSError, ET.ParseError):

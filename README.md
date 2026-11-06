@@ -1,6 +1,6 @@
 # Local Media Relay
 
-Share a few Windows folders and play the videos from a TV, Quest, or other device with a DLNA player.
+Share a few Windows folders and play videos or open photos from a TV, Quest, or other device with a DLNA player.
 
 ## Run it
 
@@ -8,29 +8,18 @@ You’ll need Python 3.11+ with Tkinter and `pythonw.exe` on PATH, plus Caddy. P
 
 Open **Start Local Media Relay.cmd**, add folders, and click **Start sharing**. On the player, look for **Local Media Relay** under network media sources. Folder selections are saved for the next launch. The `fixtures/` folders contain two short test clips.
 
-Sharing is unauthenticated. Use a trusted LAN and share only folders you want reachable from other devices.
+Use a trusted LAN. Sharing is open to reachable clients by default. To restrict it, enable **Only these IPv4 addresses** and enter the players’ addresses before starting. This filters discovery, browsing, thumbnails, and playback. Access settings save on Start.
+
+JPEG and PNG photos are supported. If ffmpeg is on PATH, previews are generated in the background and cached under `%LOCALAPPDATA%\Local Media Relay\thumbnails`. To supply your own preview, put a JPEG named `movie.mp4.thumb.jpg` beside `movie.mp4` (or `photo.png.thumb.jpg` beside a photo). It must be newer than the source and at most 2 MiB.
+
+Compatible Samsung-style DLNA players can save and read resume positions. Checkpoints are stored per file and client IP. Player support, IP changes, and real-device seek behavior still need checking.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    Player["TV, Quest, or other DLNA player"]
-    subgraph PC["Windows PC"]
-        Python["Python<br/>Discovery and catalog"]
-        Caddy["Caddy<br/>HTTP and byte ranges"]
-        Files[("Shared folders")]
-    end
-
-    Player -.->|"1. Discover"| Python
-    Player -->|"2. Browse"| Caddy
-    Player <-->|"3. Play or seek"| Caddy
-    Caddy -->|"Catalog and path checks"| Python
-    Caddy -->|"Read video"| Files
-
-    classDef control fill:#e0f2fe,stroke:#0284c7,color:#082f49
-    classDef delivery fill:#d1fae5,stroke:#059669,color:#064e3b
-    class Python control
-    class Caddy delivery
+```text
+DLNA player ── discover ──> Python (SSDP)
+DLNA player ── browse ────> Caddy ──> Python (catalog)
+DLNA player ── play/seek ─> Caddy ──> selected files, after a Python path check
 ```
 
 Python checks which files can be shared. Caddy serves the bytes and handles HTTP details such as ranges and `If-Range`. The folder picker starts and stops both together. [Caddy file server](https://caddyserver.com/docs/caddyfile/directives/file_server) · [Caddy implementation](https://github.com/caddyserver/caddy/blob/v2.11.1/modules/caddyhttp/fileserver/staticfiles.go)
@@ -43,5 +32,8 @@ Python checks which files can be shared. Caddy serves the bytes and handles HTTP
 
 ## Testing
 
-Run `python -B -m unittest discover -s tests -v` for the offline regression tests.
-Run `python -B smoke.py` for the synthetic discovery, browse, and seek checks. The [test checklist](REQUIREMENTS.md) tracks what’s left, including 50–100 GB files, VR and alpha playback on compatible players, and JPEG/PNG support.
+Install the development tools with `python -m pip install -r requirements-dev.txt`.
+Run `python -m ruff check .` for linting and `python -B -m unittest discover -s tests -v` for regression tests. Both run automatically on pushes and pull requests.
+Run `python -B smoke.py` for the synthetic discovery, browse, and seek checks. The [test checklist](REQUIREMENTS.md) tracks real-device playback, VR and alpha checks, and future device selection.
+
+Add `--large-files` to check byte ranges in sparse 50 GB and 100 GB test files. The Windows temporary directory must support sparse files. The [checklist](REQUIREMENTS.md#device-access-ideas) also tracks ideas for choosing which devices can connect.

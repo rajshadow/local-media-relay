@@ -12,6 +12,7 @@ from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener
 
 import settings
+from access import allowed_addresses
 from dlna import DLNA_FEATURES
 from windows_job import ChildJob
 
@@ -33,7 +34,9 @@ def caddy_executable():
 
 
 class Caddy:
-    def __init__(self, host, backend_port, udn):
+    def __init__(self, host, backend_port, udn, allowed_clients=None):
+        self.allowed_clients = allowed_addresses(allowed_clients)
+        self.health_token = uuid.uuid4().hex
         executable = caddy_executable()
         with socket.socket() as reservation:
             reservation.bind((host, 0))
@@ -46,7 +49,7 @@ class Caddy:
         try:
             folder = Path(self.runtime.name)
             config = folder / 'Caddyfile'
-            config.write_text(self.config(host, port, backend_port), encoding='utf-8')
+            config.write_text(self.config(host, port, backend_port, self.allowed_clients, self.health_token), encoding='utf-8')
             settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
             self.log_path = settings.LOG_DIR / f'{timestamp}_{uuid.uuid4().hex[:12]}.jsonl'
@@ -59,19 +62,19 @@ class Caddy:
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             self.job.attach(self.process)
             self.job_attached = True
-            self.wait_until_ready(udn)
+            self.wait_until_ready()
         except BaseException:
             self.stop()
             raise
 
-    def wait_until_ready(self, udn):
+    def wait_until_ready(self):
         client = build_opener(ProxyHandler({}))
         for _ in range(60):
             if self.process.poll() is not None:
                 break
             try:
-                with client.open(self.base + '/dlna/device.xml', timeout=0.25) as response:
-                    if f'<UDN>{udn}</UDN>'.encode() in response.read():
+                with client.open(self.base + '/_relay-health/' + self.health_token, timeout=0.25) as response:
+                    if response.read() == self.health_token.encode():
                         return
             except (URLError, TimeoutError):
                 pass
@@ -89,8 +92,25 @@ class Caddy:
         self.runtime.cleanup()
 
     @staticmethod
-    def config(host, port, backend_port):
+    def config(host, port, backend_port, allowed_clients=None, health_token=None):
         backend = f'127.0.0.1:{backend_port}'
+        addresses = allowed_addresses(allowed_clients)
+        access_gate = ''
+        if addresses is not None:
+            access_gate = f'''        @blocked not remote_ip {" ".join(addresses)}
+        respond @blocked 403
+'''
+        health_route = ''
+        if health_token is not None:
+            health_route = f'''        @health {{
+            method GET HEAD
+            path /_relay-health/{health_token}
+            remote_ip {host}
+        }}
+        handle @health {{
+            respond "{health_token}" 200
+        }}
+'''
         return f'''{{
     admin off
     auto_https off
@@ -102,33 +122,37 @@ http://{host}:{port} {{
         output stderr
         format json
     }}
-    @media {{
-        method GET HEAD
-        path /media/*
-    }}
-    handle @media {{
-        route {{
-            forward_auth {backend} {{
-                uri /internal/media
-                copy_headers X-Relay-Root X-Relay-File X-Relay-Type
-            }}
-            rewrite {{http.request.header.X-Relay-File}}
-            header {{
-                Content-Type {{http.request.header.X-Relay-Type}}
-                contentFeatures.dlna.org {DLNA_FEATURES}
-                transferMode.dlna.org Streaming
-            }}
-            file_server {{
-                root {{http.request.header.X-Relay-Root}}
-                disable_canonical_uris
+    route {{
+{health_route}{access_gate}        @media {{
+            method GET HEAD
+            path /media/*
+        }}
+        handle @media {{
+            route {{
+                forward_auth {backend} {{
+                    uri /internal/media
+                    copy_headers X-Relay-Root X-Relay-File X-Relay-Type
+                }}
+                rewrite {{http.request.header.X-Relay-File}}
+                header {{
+                    Content-Type {{http.request.header.X-Relay-Type}}
+                    contentFeatures.dlna.org {DLNA_FEATURES}
+                    transferMode.dlna.org Streaming
+                }}
+                file_server {{
+                    root {{http.request.header.X-Relay-Root}}
+                    disable_canonical_uris
+                }}
             }}
         }}
-    }}
-    handle /dlna/* {{
-        reverse_proxy {backend}
-    }}
-    handle {{
-        respond 404
+        handle /dlna/* {{
+            reverse_proxy {backend} {{
+                header_up X-Relay-Client {{remote_host}}
+            }}
+        }}
+        handle {{
+            respond 404
+        }}
     }}
 }}
 '''

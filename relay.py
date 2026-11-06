@@ -1,4 +1,5 @@
 """DLNA HTTP transport and owned session lifecycle."""
+import base64
 import socket
 import threading
 import time
@@ -6,9 +7,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlsplit
 
 import dlna
+import settings
 from caddy_backend import Caddy
-from library import Library, VIDEO_EXTS
+from checkpoints import Checkpoints
+from library import Library, is_media
 from ssdp import Discovery
+from thumbnails import MAX_THUMBNAIL_BYTES, ThumbnailManager
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -36,6 +40,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == '/internal/media':
                 self.authorize_media(relay.library)
+            elif path.startswith('/dlna/thumb/'):
+                self.thumbnail(path)
             elif path == '/dlna/device.xml':
                 self.reply(dlna.device_xml(relay.udn), 'text/xml')
             elif path == '/dlna/content-directory.xml':
@@ -56,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         file = library.path(path.removeprefix('/media/'))
-        if file is None or file.suffix.lower() not in VIDEO_EXTS or not file.is_file():
+        if file is None or not is_media(file) or not file.is_file():
             self.send_error(404)
             return
         self.send_response(204)
@@ -64,6 +70,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Relay-File', '/' + quote(file.name, safe=''))
         self.send_header('X-Relay-Type', dlna.mime_for(file))
         self.end_headers()
+
+    def thumbnail(self, path):
+        identifier = path.removeprefix('/dlna/thumb/').removesuffix('.jpg')
+        key = base64.b64decode(identifier + '=' * (-len(identifier) % 4),
+                               altchars=b'-_', validate=True).decode()
+        file = self.server.relay.library.path(key)
+        if file is None or not is_media(file) or not file.is_file():
+            self.send_error(404)
+            return
+        thumbnail = self.server.relay.thumbnails.request(file)
+        if thumbnail is None:
+            self.send_response(404)
+            self.send_header('Retry-After', '2')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        with thumbnail.open('rb') as stream:
+            preview = stream.read(MAX_THUMBNAIL_BYTES + 1)
+        if len(preview) > MAX_THUMBNAIL_BYTES:
+            self.send_error(404)
+            return
+        self.reply(preview, 'image/jpeg')
 
     def do_POST(self):
         path = urlsplit(self.path).path
@@ -75,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             body = self.rfile.read(length)
             if path == '/dlna/content-directory/control':
-                status, response = self.server.relay.content.content_action(action, body)
+                status, response = self.server.relay.content.content_action(action, body, self.headers.get('X-Relay-Client', ''))
             elif path == '/dlna/connection-manager/control':
                 status, response = dlna.connection_manager_action(action, body)
             else:
@@ -96,20 +124,25 @@ class HttpServer(ThreadingHTTPServer):
 
 
 class Relay:
-    def __init__(self, folders, host, udn):
+    def __init__(self, folders, host, udn, allowed_clients=None):
         self.library = Library(folders)
         self.stopped = threading.Event()
         self.udn = udn
+        self.checkpoints = Checkpoints(settings.APP_DIR / 'checkpoints.json')
+        self.thumbnails = None
+        self.http = None
+        self.http_thread = None
         boot_id = int(time.time())
-        self.http = HttpServer(('127.0.0.1', 0), Handler)
-        self.http.relay = self
-        self.http_thread = threading.Thread(target=self.http.serve_forever, args=(0.1,), daemon=True)
-        self.http_thread.start()
         try:
-            self.caddy = Caddy(host, self.http.server_port, udn)
+            self.thumbnails = ThumbnailManager(settings.APP_DIR / 'thumbnails', self.library)
+            self.http = HttpServer(('127.0.0.1', 0), Handler)
+            self.http.relay = self
+            self.http_thread = threading.Thread(target=self.http.serve_forever, args=(0.1,), daemon=True)
+            self.http_thread.start()
+            self.caddy = Caddy(host, self.http.server_port, udn, allowed_clients=allowed_clients)
             self.base = self.caddy.base
-            self.content = dlna.ContentDirectory(self.library, self.base, boot_id)
-            self.discovery = Discovery(host, self.base, udn, boot_id)
+            self.content = dlna.ContentDirectory(self.library, self.base, boot_id, thumbnails=self.thumbnails, checkpoints=self.checkpoints)
+            self.discovery = Discovery(host, self.base, udn, boot_id, allowed_clients=allowed_clients)
         except BaseException:
             self.stop()
             raise
@@ -124,6 +157,11 @@ class Relay:
                 if hasattr(self, 'caddy'):
                     self.caddy.stop()
             finally:
-                self.http.shutdown()
-                self.http.server_close()
-                self.http_thread.join()
+                if self.http is not None:
+                    if self.http_thread is not None and self.http_thread.is_alive():
+                        self.http.shutdown()
+                    self.http.server_close()
+                if self.http_thread is not None and self.http_thread.ident is not None:
+                    self.http_thread.join()
+                if self.thumbnails is not None:
+                    self.thumbnails.close()

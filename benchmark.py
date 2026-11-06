@@ -1,7 +1,6 @@
 """Compare the former Python media handler and Caddy over Windows loopback."""
 import argparse
 import concurrent.futures
-import os
 import random
 import re
 import shutil
@@ -14,10 +13,10 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote, urlsplit
 
 import dlna
-from library import Library, VIDEO_EXTS
-from urllib.parse import unquote, urlsplit
+from library import VIDEO_EXTS, Library
 from relay import Handler, HttpServer
 
 HOST = '127.0.0.1'

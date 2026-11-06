@@ -1,19 +1,25 @@
 """Exercise the owned server using synthetic clips and local HTTP clients."""
+import argparse
 import json
 import socket
+import stat
+import struct
+import subprocess
 import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
+import zlib
 from pathlib import Path
-from urllib.parse import quote
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, ProxyHandler, build_opener
+from urllib.parse import quote
+from urllib.request import ProxyHandler, Request, build_opener
 
 import settings
 from dlna import token
 from relay import Relay
 from ssdp import SSDP_ADDR, lan_ip, parse_ssdp
+from thumbnails import jpeg_preview
 
 HERE = Path(__file__).resolve().parent
 FOLDERS = [HERE / 'fixtures' / name for name in ('Color bars', 'Motion')]
@@ -49,18 +55,122 @@ def find_relay(relay, host, udn):
     raise AssertionError('No SSDP response for the relay on the selected interface')
 
 
+def sparse_fixtures(folder):
+    fixtures = []
+    for gigabytes in (50, 100):
+        length = gigabytes * 10**9
+        path = folder / f'sparse-{gigabytes}GB.mp4'
+        path.touch()
+        subprocess.run(['fsutil.exe', 'sparse', 'setflag', str(path)], check=True, capture_output=True)
+        if not path.stat().st_file_attributes & stat.FILE_ATTRIBUTE_SPARSE_FILE:
+            raise RuntimeError(f'Sparse flag missing for {path.name}')
+        markers = {
+            0: b'start',
+            4 * 2**30 + 123: b'beyond-4-GiB',
+            length - 3: b'end',
+        }
+        with path.open('r+b') as file:
+            for offset, marker in markers.items():
+                file.seek(offset)
+                file.write(marker)
+        fixtures.append((path.name, length, markers))
+    return fixtures
+
+
+def check_large_files(base, fixtures):
+    for name, length, markers in fixtures:
+        url = base + '/media/2/' + name
+        status, headers, _ = request(url, method='HEAD')
+        assert status == 200 and int(headers['Content-Length']) == length
+        for offset, marker in markers.items():
+            end = offset + len(marker) - 1
+            query = Request(url, headers={'Range': f'bytes={offset}-{end}'})
+            with CLIENT.open(query, timeout=3) as response:
+                assert response.status == 206
+                assert response.headers['Content-Range'] == f'bytes {offset}-{end}/{length}'
+                assert response.read(len(marker) + 1) == marker
+        print(f'{name}: HEAD and byte ranges at start, beyond 4 GiB, and EOF passed.')
+
+
+def check_preview(relay, key):
+    url = relay.base + '/dlna/thumb/' + token(key) + '.jpg'
+    if not relay.thumbnails.ffmpeg:
+        print('Preview generation skipped because ffmpeg is not on PATH.')
+        return
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            status, headers, image = request(url)
+        except HTTPError as error:
+            assert error.code == 404
+            time.sleep(0.1)
+            continue
+        assert status == 200 and headers['Content-Type'] == 'image/jpeg'
+        assert image.startswith(b'\xff\xd8') and image.endswith(b'\xff\xd9')
+        generated = relay.thumbnails.cache_path(relay.library.path(key))
+        assert jpeg_preview(generated)
+        before = generated.stat().st_mtime_ns
+        assert request(url)[2] == image
+        assert generated.stat().st_mtime_ns == before
+        return
+    raise AssertionError('Thumbnail generation timed out')
+
+
+def check_restricted(folders, host):
+    approved = Relay(folders, host, 'uuid:' + str(uuid.uuid4()), allowed_clients=[host])
+    try:
+        find_relay(approved, host, approved.udn)
+        assert request(approved.base + '/dlna/device.xml')[0] == 200
+        assert request(approved.base + '/media/0/Color%20bars.mp4')[0] == 200
+    finally:
+        approved.stop()
+    denied = Relay(folders, host, 'uuid:' + str(uuid.uuid4()), allowed_clients=['192.0.2.123'])
+    try:
+        for path in ('/dlna/device.xml', '/media/0/Color%20bars.mp4',
+                     '/dlna/thumb/' + token('0/Color bars.mp4') + '.jpg'):
+            try:
+                request(denied.base + path, headers={'X-Forwarded-For': '192.0.2.123',
+                                                    'X-Relay-Client': '192.0.2.123'})
+            except HTTPError as error:
+                assert error.code == 403
+            else:
+                raise AssertionError('Denied client accessed a protected route')
+        try:
+            find_relay(denied, host, denied.udn)
+        except AssertionError as error:
+            assert str(error).startswith('No SSDP response')
+        else:
+            raise AssertionError('Discovery answered a denied client')
+    finally:
+        denied.stop()
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--large-files', action='store_true', help='Check sparse 50 GB and 100 GB byte offsets')
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='relay-smoke-') as temp:
-        settings.LOG_DIR = Path(temp) / 'logs'
+        settings.APP_DIR = Path(temp) / 'state'
+        settings.LOG_DIR = settings.APP_DIR / 'logs'
         folder = Path(temp) / 'Tést {folder}'
         folder.mkdir()
         clip = folder / '100%20 # café {x}_ALPHA.mp4'
-        clip.write_bytes(CLIP.read_bytes() + b'separate fixture')
+        clip.write_bytes(CLIP.read_bytes())
+        photo = folder / 'photo.png'
+        def png_chunk(kind, data):
+            checksum = zlib.crc32(kind + data)
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', checksum)
+
+        header = struct.pack('>IIBBBBB', 2, 2, 8, 6, 0, 0, 0)
+        pixels = (b'\0' + b'\xff\0\0\xff' * 2) * 2
+        photo.write_bytes(b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', header)
+                          + png_chunk(b'IDAT', zlib.compress(pixels)) + png_chunk(b'IEND', b''))
         (folder / 'private.txt').write_text('must not be served', encoding='utf-8')
-        run([*FOLDERS, folder], clip)
+        large_files = sparse_fixtures(folder) if args.large_files else ()
+        run([*FOLDERS, folder], clip, large_files)
 
 
-def run(folders, clip):
+def run(folders, clip, large_files):
     original = CLIP.read_bytes()
     udn = 'uuid:' + str(uuid.uuid4())
     host = lan_ip()
@@ -71,8 +181,14 @@ def run(folders, clip):
             find_relay(relay, host, udn)
             base = relay.base
             assert second.base != base
+            check_large_files(base, large_files)
             media = base + '/media/0/Color%20bars.mp4'
             assert request(media)[2] == original
+            photo = relay.library.path('2/photo.png')
+            assert request(base + '/media/2/photo.png')[2] == photo.read_bytes()
+            assert request(base + '/media/2/photo.png')[1]['Content-Type'] == 'image/png'
+            check_preview(relay, '0/Color bars.mp4')
+            check_preview(relay, '2/photo.png')
             tagged_media = base + '/media/2/' + quote(clip.name, safe='')
             _, caddy_headers, received = request(tagged_media, headers={
                 'X-Relay-Root': 'C:/', 'X-Relay-File': '/private.txt',
@@ -112,6 +228,19 @@ def run(folders, clip):
                 result = ET.fromstring(request(
                     base + '/dlna/content-directory/control', data=body, headers=soap)[2])
                 assert expected in result.findtext('.//Result')
+            bookmark_id = token('0/Color bars.mp4')
+            bookmark_headers = {'SOAPAction': '"urn:schemas-upnp-org:service:ContentDirectory:1#X_SetBookmark"',
+                                'X-Relay-Client': 'spoofed'}
+            bookmark = (f'<Action><ObjectID>{bookmark_id}</ObjectID>'
+                        '<PosSecond>91500</PosSecond></Action>').encode()
+            assert request(base + '/dlna/content-directory/control', data=bookmark, headers=bookmark_headers)[0] == 200
+            browse = (f'<Browse><ObjectID>{bookmark_id}</ObjectID>'
+                      '<BrowseFlag>BrowseMetadata</BrowseFlag></Browse>').encode()
+            metadata = ET.fromstring(request(base + '/dlna/content-directory/control',
+                                              data=browse, headers=soap)[2]).findtext('.//Result')
+            assert 'BM=91500' in metadata
+            assert relay.checkpoints.get(CLIP, host) == 91.5
+            assert relay.checkpoints.get(CLIP, 'spoofed') == 0
             relay.stop()
             assert relay.caddy.process.poll() is not None
             log = relay.caddy.log_path
@@ -146,7 +275,8 @@ def run(folders, clip):
     finally:
         restarted.stop()
     assert CLIP.read_bytes() == original
-    print('Smoke passed: SSDP, SOAP, Caddy range and If-Range, filename fidelity, file gating, owned restart, and persistent seek logs.')
+    check_restricted(folders, host)
+    print('Smoke passed: discovery, images, previews, ranges, checkpoint identity, access controls and lifecycle.')
 
 
 if __name__ == '__main__':

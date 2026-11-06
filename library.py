@@ -3,8 +3,13 @@ import re
 import stat
 from pathlib import Path
 
-
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
+
+
+def is_media(path):
+    return path.suffix.lower() in MEDIA_EXTS and not path.name.lower().endswith('.thumb.jpg')
 
 
 class Library:
@@ -42,7 +47,7 @@ class Library:
             child = f'{key}/{item.name}'
             try:
                 candidate = self.path(child)
-                if candidate.is_dir() or (candidate.is_file() and candidate.suffix.lower() in VIDEO_EXTS):
+                if candidate.is_dir() or (candidate.is_file() and is_media(candidate)):
                     children.append(child)
             except (OSError, ValueError):
                 continue

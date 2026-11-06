@@ -5,6 +5,8 @@ import threading
 import time
 from email.utils import formatdate
 
+from access import allowed_addresses
+
 SSDP_ADDR = ('239.255.255.250', 1900)
 MAX_SSDP_PACKET = 4096
 SERVER_STRING = 'Windows UPnP/1.0 LocalMediaRelay/0.1'
@@ -22,7 +24,8 @@ def lan_ip():
 
 
 class Discovery:
-    def __init__(self, host, base, udn, boot_id):
+    def __init__(self, host, base, udn, boot_id, allowed_clients=None):
+        self.allowed_clients = allowed_addresses(allowed_clients)
         self.base, self.boot_id = base, boot_id
         self.targets = ssdp_targets(udn)
         self.stopped = threading.Event()
@@ -49,6 +52,8 @@ class Discovery:
         self.thread.start()
 
     def announce(self, kind):
+        if getattr(self, 'allowed_clients', None) is not None:
+            return
         for target, usn in self.targets:
             self.sender.sendto(ssdp_notify(self.base, self.boot_id, target, usn, kind), SSDP_ADDR)
 
@@ -64,6 +69,9 @@ class Discovery:
                     try:
                         packet, client = self.receiver.recvfrom(65535)
                     except (TimeoutError, ConnectionResetError):
+                        continue
+                    allowed = getattr(self, 'allowed_clients', None)
+                    if allowed is not None and client[0] not in allowed:
                         continue
                     if len(packet) > MAX_SSDP_PACKET or not packet.upper().startswith(b'M-SEARCH '):
                         continue
