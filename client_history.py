@@ -3,6 +3,7 @@ import heapq
 import ipaddress
 import json
 import math
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,9 +131,24 @@ def merge_client(prior, current):
                       max(prior.last_seen, current.last_seen), activity, tuple(ranked))
 
 
-def recent_clients(log_dir, now=None):
+def local_ipv4_addresses(selected_host=''):
+    addresses = set()
+    try:
+        addresses.add(str(ipaddress.IPv4Address(selected_host)))
+    except (ValueError, TypeError):
+        pass
+    try:
+        interfaces = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        addresses.update(interface[4][0] for interface in interfaces)
+    except OSError:
+        pass
+    return addresses
+
+
+def recent_clients(log_dir, now=None, exclude_addresses=()):
     """Read bounded log tails. Return clients and a count of unreadable files."""
     now = time.time() if now is None else now
+    excluded = set(exclude_addresses)
     candidates = []
     unreadable = 0
     try:
@@ -175,7 +191,7 @@ def recent_clients(log_dir, now=None):
                     except (ValueError, UnicodeError, RecursionError):
                         continue
                     client = client_from_event(event, now)
-                    if client is None:
+                    if client is None or client.address in excluded:
                         continue
                     key = client.address
                     clients[key] = merge_client(clients.get(key), client)

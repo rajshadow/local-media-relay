@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import settings
 from access import allowed_addresses
-from client_history import HISTORY_DAYS, recent_clients
+from client_history import HISTORY_DAYS, local_ipv4_addresses, recent_clients
 from relay import Relay
 from ssdp import lan_ip
 
@@ -87,7 +87,7 @@ class App:
         self.history_note = tk.StringVar()
         ttk.Label(history, textvariable=self.history_note, wraplength=580).grid(
             row=4, column=0, columnspan=2, sticky='w', pady=(5, 0))
-        ttk.Label(history, text='Grouped by IP. Device guesses use reported headers; addresses can change.').grid(
+        ttk.Label(history, text='This PC is hidden. Grouped by IP; device guesses and addresses can change.').grid(
             row=5, column=0, columnspan=2, sticky='w')
         self.load_settings()
         self.update_access_controls()
@@ -142,10 +142,12 @@ class App:
         self.history_loading = True
         self.refresh_clients_button.config(state='disabled')
         self.history_note.set('Reading recent access logs…')
+        selected_host = self.host.get().strip()
 
         def read_history():
             try:
-                result = recent_clients(settings.LOG_DIR)
+                excluded = local_ipv4_addresses(selected_host)
+                result = recent_clients(settings.LOG_DIR, exclude_addresses=excluded)
                 self.history_queue.put((result, None))
             except Exception as error:
                 self.history_queue.put((None, str(error)))

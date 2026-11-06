@@ -7,7 +7,13 @@ from unittest.mock import Mock, patch
 
 import client_history
 from app import App
-from client_history import SeenClient, client_from_event, device_guess, recent_clients
+from client_history import (
+    SeenClient,
+    client_from_event,
+    device_guess,
+    local_ipv4_addresses,
+    recent_clients,
+)
 
 NOW = 1_800_000_000
 
@@ -148,12 +154,37 @@ class HistoryTests(unittest.TestCase):
         self.assertIn('Quest player', clients[0].evidence)
         self.assertIn('Samsung', clients[0].evidence)
 
+    def test_excludes_this_pc_before_grouping(self):
+        self.write_log([
+            event(address='192.168.1.16', agent='Python-urllib/3.13'),
+            event(address='10.0.0.2', agent='Microsoft-Windows/10.0'),
+            event(address='192.168.1.8', agent='Samsung'),
+        ])
+        clients, _ = recent_clients(self.logs, NOW, exclude_addresses={'192.168.1.16', '10.0.0.2'})
+        self.assertEqual([client.address for client in clients], ['192.168.1.8'])
+
     def test_unreadable_files_are_reported_without_discarding_history(self):
         self.write_log([event()])
         with patch.object(Path, 'open', side_effect=PermissionError('locked')):
             clients, unreadable = recent_clients(self.logs, NOW)
         self.assertEqual(clients, [])
         self.assertEqual(unreadable, 1)
+
+
+class LocalAddressTests(unittest.TestCase):
+    def test_includes_selected_host_and_addresses_from_multiple_interfaces(self):
+        interfaces = [
+            (2, 1, 6, '', ('192.168.1.16', 0)),
+            (2, 1, 6, '', ('10.0.0.2', 0)),
+        ]
+        with patch('client_history.socket.getaddrinfo', return_value=interfaces):
+            self.assertEqual(local_ipv4_addresses('192.168.1.99'),
+                             {'192.168.1.16', '10.0.0.2', '192.168.1.99'})
+
+    def test_selected_host_is_excluded_even_if_hostname_lookup_fails(self):
+        with patch('client_history.socket.getaddrinfo', side_effect=OSError('no DNS')):
+            self.assertEqual(local_ipv4_addresses('192.168.1.16'), {'192.168.1.16'})
+            self.assertEqual(local_ipv4_addresses('invalid edit'), set())
 
 
 class SelectionTests(unittest.TestCase):
