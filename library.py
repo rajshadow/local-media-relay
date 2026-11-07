@@ -1,11 +1,16 @@
 """Read-only folder mapping for DLNA object IDs and media URLs."""
 import re
 import stat
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
+MAX_CACHED_CHILDREN = 50000
+DIRECTORY_CACHE_SECONDS = 2.0
 
 
 def is_media(path):
@@ -17,6 +22,9 @@ class Library:
         self.roots = [Path(folder).resolve(strict=True) for folder in folders]
         if not self.roots or any(not root.is_dir() for root in self.roots):
             raise ValueError('Choose at least one existing folder.')
+        self._directory_lock = threading.Lock()
+        self._directories = OrderedDict()
+        self._cached_children = 0
 
     def path(self, key):
         if not key:
@@ -42,8 +50,30 @@ class Library:
         path = self.path(key)
         if not path.is_dir():
             return []
+        info = path.stat()
+        stamp = info.st_ino, info.st_mtime_ns
+        with self._directory_lock:
+            cached = self._directories.pop((path, key), None)
+            if cached is not None:
+                self._cached_children -= len(cached[2])
+                if cached[0] == stamp and time.monotonic() < cached[1]:
+                    self._directories[path, key] = cached
+                    self._cached_children += len(cached[2])
+                    # The caller owns its list and cannot mutate the cache.
+                    return list(cached[2])
+            children = self._scan_children(path, key)
+            if len(children) <= MAX_CACHED_CHILDREN:
+                self._directories[path, key] = (stamp, time.monotonic() + DIRECTORY_CACHE_SECONDS,
+                                           tuple(children))
+                self._cached_children += len(children)
+                while len(self._directories) > 128 or self._cached_children > MAX_CACHED_CHILDREN:
+                    _, evicted = self._directories.popitem(last=False)
+                    self._cached_children -= len(evicted[2])
+            return children
+
+    def _scan_children(self, path, key):
         children = []
-        for item in sorted(path.iterdir(), key=lambda entry: entry.name.casefold()):
+        for item in path.iterdir():
             child = f'{key}/{item.name}'
             try:
                 candidate = self.path(child)

@@ -1,5 +1,6 @@
 """Exercise the owned server using synthetic clips and local HTTP clients."""
 import argparse
+import base64
 import json
 import socket
 import stat
@@ -112,8 +113,36 @@ def check_preview(relay, key):
         before = generated.stat().st_mtime_ns
         assert request(url)[2] == image
         assert generated.stat().st_mtime_ns == before
+        try:
+            request(url, headers={'If-None-Match': headers['ETag']})
+        except HTTPError as error:
+            assert error.code == 304
+            assert error.headers['ETag'] == headers['ETag']
+        else:
+            raise AssertionError('Repeated artwork was not revalidated')
         return
     raise AssertionError('Thumbnail generation timed out')
+
+
+def check_imported_map(relay):
+    if not relay.thumbnails.ffmpeg:
+        return
+    source = relay.library.path('2/photo.png')
+    # Reuse a different, genuinely generated JPEG to distinguish it from the
+    # image's existing generated preview.
+    preview = relay.thumbnails.cache_path(CLIP).read_bytes()
+    url = relay.base + '/dlna/thumb/' + token('2/photo.png') + '.jpg'
+    old_etag = request(url)[1]['ETag']
+    mapping = source.parent / 'thumbs_ready.json'
+    mapping.write_text(json.dumps({'PHOTO.PNG': 'data:image/jpeg;base64,' +
+                                  base64.b64encode(preview).decode()}), encoding='utf-8')
+    deadline = time.monotonic() + 5
+    while relay.thumbnails.pre_generated(source) != preview:
+        if time.monotonic() >= deadline:
+            raise AssertionError('New thumbnail map was not discovered')
+        time.sleep(0.05)
+    status, headers, body = request(url, headers={'If-None-Match': old_etag})
+    assert status == 200 and body == preview and headers['ETag'] != old_etag
 
 
 def check_restricted(folders, host):
@@ -218,6 +247,7 @@ def run(folders, clip, large_files):
             assert request(base + '/media/2/photo.png')[1]['Content-Type'] == 'image/png'
             check_preview(relay, '0/Color bars.mp4')
             check_preview(relay, '2/photo.png')
+            check_imported_map(relay)
             tagged_media = base + '/media/2/' + quote(clip.name, safe='')
             _, caddy_headers, received = request(tagged_media, headers={
                 'X-Relay-Root': 'C:/', 'X-Relay-File': '/private.txt',

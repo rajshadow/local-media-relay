@@ -9,10 +9,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from library import VIDEO_EXTS, is_media
+from image_thumbs import MAX_THUMBNAIL_BYTES, ImageThumbnailMaps
+from library import IMAGE_EXTS, VIDEO_EXTS, is_media
 from windows_job import ChildJob
 
-MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
 AUTO_FFMPEG = object()
 PREVIEW_VERSION = 'jpeg-320x180-v1'
 
@@ -38,6 +38,7 @@ class ThumbnailManager:
     def __init__(self, cache_dir, library, ffmpeg=AUTO_FFMPEG, workers=2, pending_limit=8):
         self.cache_dir = Path(cache_dir)
         self.library = library
+        self.image_maps = ImageThumbnailMaps(library)
         self.ffmpeg = shutil.which('ffmpeg') if ffmpeg is AUTO_FFMPEG else ffmpeg
         self.pending_limit = pending_limit
         self._job = ChildJob() if os.name == 'nt' and self.ffmpeg else None
@@ -69,6 +70,28 @@ class ThumbnailManager:
             except (OSError, ValueError):
                 pass
         return None
+
+    def pre_generated(self, source):
+        source = Path(source)
+        if source.suffix.lower() in IMAGE_EXTS:
+            return self.image_maps.thumbnail(source)
+        return None
+
+    def advertise(self, source):
+        if self.pre_generated(source) is not None:
+            return True
+        return self.request(source) is not None or bool(self.ffmpeg)
+
+    def preview_bytes(self, source):
+        image = self.pre_generated(source)
+        if image is not None:
+            return image
+        path = self.request(source)
+        if path is None:
+            return None
+        with path.open('rb') as stream:
+            image = stream.read(MAX_THUMBNAIL_BYTES + 1)
+        return image if len(image) <= MAX_THUMBNAIL_BYTES else None
 
     def request(self, source):
         """Return an existing preview, or queue work and return immediately."""

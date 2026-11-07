@@ -14,6 +14,8 @@ Use a trusted LAN. Sharing is open to reachable clients by default. To restrict 
 
 JPEG and PNG photos are supported. If ffmpeg is on PATH, previews are generated in the background and cached under `%LOCALAPPDATA%\Local Media Relay\thumbnails`. To supply your own preview, put a JPEG named `movie.mp4.thumb.jpg` beside `movie.mp4` (or `photo.png.thumb.jpg` beside a photo). It must be newer than the source and at most 2 MiB.
 
+Existing `thumbs_*.json` maps are also read from image folders. The newest map can contain filename-to-base64-JPEG entries or `data:image/jpeg;base64,...` values. Maps and source files are matched case-insensitively. Keep the map newer than its source images; maps over 64 MiB fall back to normal preview generation. Shared caches reuse parsed maps, decoded previews and directory listings, with changes checked within two seconds.
+
 Compatible Samsung-style DLNA players can save and read resume positions. Checkpoints are stored per file and client IP. Player support, IP changes, and real-device seek behavior still need checking.
 
 ## How it works

@@ -302,8 +302,7 @@ class ContentDirectory:
             bookmark = f'<sec:dcmInfo>CREATIONDATE=0,FOLDER={folder},BM={position}</sec:dcmInfo>'
         artwork = ''
         if self.thumbnails is not None:
-            thumbnail = self.thumbnails.request(path)
-            if thumbnail is not None or self.thumbnails.ffmpeg:
+            if self.thumbnails.advertise(path):
                 artwork = (f'<upnp:albumArtURI>{html.escape(self.base)}/dlna/thumb/{identifier}.jpg'
                            '</upnp:albumArtURI>')
         return (f'<item id="{identifier}" parentID="{parent}" restricted="1">'

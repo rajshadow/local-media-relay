@@ -1,5 +1,6 @@
 """DLNA HTTP transport and owned session lifecycle."""
 import base64
+import hashlib
 import socket
 import threading
 import time
@@ -12,7 +13,7 @@ from caddy_backend import Caddy
 from checkpoints import Checkpoints
 from library import Library, is_media
 from ssdp import Discovery
-from thumbnails import MAX_THUMBNAIL_BYTES, ThumbnailManager
+from thumbnails import ThumbnailManager
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -79,19 +80,26 @@ class Handler(BaseHTTPRequestHandler):
         if file is None or not is_media(file) or not file.is_file():
             self.send_error(404)
             return
-        thumbnail = self.server.relay.thumbnails.request(file)
-        if thumbnail is None:
+        preview = self.server.relay.thumbnails.preview_bytes(file)
+        if preview is None:
             self.send_response(404)
             self.send_header('Retry-After', '2')
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
-        with thumbnail.open('rb') as stream:
-            preview = stream.read(MAX_THUMBNAIL_BYTES + 1)
-        if len(preview) > MAX_THUMBNAIL_BYTES:
-            self.send_error(404)
-            return
-        self.reply(preview, 'image/jpeg')
+        etag = '"' + hashlib.sha256(preview).hexdigest() + '"'
+        validators = {tag.strip().removeprefix('W/') for tag in
+                      self.headers.get('If-None-Match', '').split(',')}
+        unchanged = etag in validators or '*' in validators
+        self.send_response(304 if unchanged else 200)
+        self.send_header('ETag', etag)
+        self.send_header('Cache-Control', 'private, no-cache')
+        if not unchanged:
+            self.send_header('Content-Type', 'image/jpeg')
+            self.send_header('Content-Length', str(len(preview)))
+        self.end_headers()
+        if not unchanged and self.command != 'HEAD':
+            self.wfile.write(preview)
 
     def do_POST(self):
         path = urlsplit(self.path).path
