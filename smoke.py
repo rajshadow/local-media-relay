@@ -124,13 +124,13 @@ def check_restricted(folders, host):
         assert request(approved.base + '/media/0/Color%20bars.mp4')[0] == 200
     finally:
         approved.stop()
-    denied = Relay(folders, host, 'uuid:' + str(uuid.uuid4()), allowed_clients=['192.0.2.123'])
+    denied = Relay(folders, host, 'uuid:' + str(uuid.uuid4()), allowed_clients=['127.0.0.2'])
     try:
         for path in ('/dlna/device.xml', '/media/0/Color%20bars.mp4',
                      '/dlna/thumb/' + token('0/Color bars.mp4') + '.jpg'):
             try:
-                request(denied.base + path, headers={'X-Forwarded-For': '192.0.2.123',
-                                                    'X-Relay-Client': '192.0.2.123'})
+                request(denied.base + path, headers={'X-Forwarded-For': '127.0.0.2',
+                                                    'X-Relay-Client': '127.0.0.2'})
             except HTTPError as error:
                 assert error.code == 403
             else:
@@ -143,6 +143,30 @@ def check_restricted(folders, host):
             raise AssertionError('Discovery answered a denied client')
     finally:
         denied.stop()
+
+
+def check_nested_photos(relay):
+    soap = {'SOAPAction': '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"'}
+    for key, expected in (
+        ('2', '2/z nested'),
+        ('2/z nested', '2/z nested/deeper photos'),
+    ):
+        body = (f'<Browse><ObjectID>{token(key)}</ObjectID>'
+                '<BrowseFlag>BrowseDirectChildren</BrowseFlag>'
+                '<StartingIndex>0</StartingIndex><RequestedCount>1</RequestedCount></Browse>').encode()
+        _, _, response = request(relay.base + '/dlna/content-directory/control', data=body, headers=soap)
+        entries = ET.fromstring(ET.fromstring(response).findtext('.//Result'))
+        container = entries[0]
+        assert container.tag.rsplit('}', 1)[-1] == 'container'
+        assert container.attrib['id'] == token(expected)
+        assert int(container.attrib['childCount']) >= 1
+    key = '2/z nested/deeper photos'
+    body = (f'<Browse><ObjectID>{token(key)}</ObjectID>'
+            '<BrowseFlag>BrowseDirectChildren</BrowseFlag></Browse>').encode()
+    _, _, response = request(relay.base + '/dlna/content-directory/control', data=body, headers=soap)
+    image = ET.fromstring(ET.fromstring(response).findtext('.//Result'))[0]
+    assert image.findtext('{*}class') == 'object.item.imageItem.photo'
+    assert request(image.findtext('{*}res'))[2] == relay.library.path(key + '/photo.png').read_bytes()
 
 
 def main():
@@ -165,6 +189,10 @@ def main():
         pixels = (b'\0' + b'\xff\0\0\xff' * 2) * 2
         photo.write_bytes(b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', header)
                           + png_chunk(b'IDAT', zlib.compress(pixels)) + png_chunk(b'IEND', b''))
+        deep = folder / 'z nested' / 'deeper photos'
+        deep.mkdir(parents=True)
+        (deep / 'photo.png').write_bytes(photo.read_bytes())
+        (deep.parent / 'a photo.png').write_bytes(photo.read_bytes())
         (folder / 'private.txt').write_text('must not be served', encoding='utf-8')
         large_files = sparse_fixtures(folder) if args.large_files else ()
         run([*FOLDERS, folder], clip, large_files)
@@ -182,6 +210,7 @@ def run(folders, clip, large_files):
             base = relay.base
             assert second.base != base
             check_large_files(base, large_files)
+            check_nested_photos(relay)
             media = base + '/media/0/Color%20bars.mp4'
             assert request(media)[2] == original
             photo = relay.library.path('2/photo.png')

@@ -52,10 +52,19 @@ class Discovery:
         self.thread.start()
 
     def announce(self, kind):
-        if getattr(self, 'allowed_clients', None) is not None:
-            return
+        allowed = getattr(self, 'allowed_clients', None)
+        destinations = (SSDP_ADDR,) if allowed is None else tuple((host, SSDP_ADDR[1]) for host in allowed)
         for target, usn in self.targets:
-            self.sender.sendto(ssdp_notify(self.base, self.boot_id, target, usn, kind), SSDP_ADDR)
+            packet = ssdp_notify(self.base, self.boot_id, target, usn, kind)
+            for destination in destinations:
+                try:
+                    self.sender.sendto(packet, destination)
+                except OSError:
+                    if allowed is None:
+                        raise
+                    # One offline or unroutable approved address must not stop
+                    # discovery for the other players.
+                    continue
 
     def run(self):
         with self.receiver, self.sender:

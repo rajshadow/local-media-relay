@@ -78,5 +78,36 @@ class AccessTests(unittest.TestCase):
         session.run()
         self.assertIsNone(session.error)
         destinations = [args[1] for args, _ in session.sender.sendto.call_args_list]
-        self.assertEqual(destinations, [('192.168.1.3', 12345)])
+        self.assertIn(('192.168.1.3', 12345), destinations)
+        self.assertTrue(all(destination[0] == '192.168.1.3' for destination in destinations))
         self.assertNotIn(SSDP_ADDR, destinations)
+
+
+    def test_restricted_announcements_go_only_to_approved_devices(self):
+        session = Discovery.__new__(Discovery)
+        session.allowed_clients = ('192.168.1.3', '192.168.1.5')
+        session.sender = MagicMock()
+        session.targets = [('upnp:rootdevice', 'uuid:test::upnp:rootdevice')]
+        session.base = 'http://192.168.1.2:1234'
+        session.boot_id = 1
+        for kind in ('ssdp:alive', 'ssdp:byebye'):
+            session.sender.reset_mock()
+            session.announce(kind)
+            calls = session.sender.sendto.call_args_list
+            self.assertEqual([call.args[1] for call in calls],
+                             [('192.168.1.3', 1900), ('192.168.1.5', 1900)])
+            self.assertTrue(all(kind.encode() in call.args[0] for call in calls))
+
+    def test_offline_approved_peer_does_not_prevent_other_announcements(self):
+        session = Discovery.__new__(Discovery)
+        session.allowed_clients = ('192.168.1.3', '192.168.1.5')
+        session.sender = MagicMock()
+        session.targets = [('upnp:rootdevice', 'uuid:test::upnp:rootdevice')]
+        session.base = 'http://192.168.1.2:1234'
+        session.boot_id = 1
+        for error in (ConnectionResetError(), OSError(10049, 'unroutable address')):
+            with self.subTest(error=type(error).__name__):
+                session.sender.reset_mock()
+                session.sender.sendto.side_effect = [error, None]
+                session.announce('ssdp:alive')
+                self.assertEqual(session.sender.sendto.call_count, 2)

@@ -47,11 +47,12 @@ class Library:
             child = f'{key}/{item.name}'
             try:
                 candidate = self.path(child)
-                if candidate.is_dir() or (candidate.is_file() and is_media(candidate)):
-                    children.append(child)
+                is_directory = candidate.is_dir()
+                if is_directory or (candidate.is_file() and is_media(candidate)):
+                    children.append((not is_directory, item.name.casefold(), child))
             except (OSError, ValueError):
                 continue
-        return children
+        return [child for _, _, child in sorted(children)]
 
     def title(self, key):
         if not key:

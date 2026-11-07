@@ -143,3 +143,41 @@ class MediaTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait(timeout=5)
+
+
+    def test_nested_photo_folders_have_counts_and_precede_images_when_paged(self):
+        nested = self.root / 'z nested'
+        deep = nested / 'deeper & photos'
+        deep.mkdir(parents=True)
+        (deep / 'photo.png').write_bytes(b'deep-image-fixture')
+        (nested / 'a picture.jpg').write_bytes(b'image-fixture')
+        directory = dlna.ContentDirectory(self.library, 'http://127.0.0.1:1234', 7)
+        key = '0'
+        for expected_child, expected_count in (('0/z nested', 2),
+                                               ('0/z nested/deeper & photos', 2)):
+            body = (f'<Browse><ObjectID>{dlna.token(key)}</ObjectID>'
+                    '<BrowseFlag>BrowseDirectChildren</BrowseFlag>'
+                    '<StartingIndex>0</StartingIndex><RequestedCount>1</RequestedCount></Browse>').encode()
+            status, response = directory.content_action('Browse', body)
+            self.assertEqual(status, 200)
+            soap = ET.fromstring(response)
+            self.assertEqual(int(soap.findtext('.//TotalMatches')), expected_count)
+            entries = ET.fromstring(soap.findtext('.//Result'))
+            folder = entries[0]
+            self.assertEqual(folder.tag.rsplit('}', 1)[-1], 'container')
+            self.assertEqual(folder.attrib['id'], dlna.token(expected_child))
+            self.assertGreater(int(folder.attrib['childCount']), 0)
+            status, page = directory.content_action('Browse', body.replace(
+                b'<StartingIndex>0</StartingIndex>', b'<StartingIndex>1</StartingIndex>'))
+            self.assertEqual(status, 200)
+            image = ET.fromstring(ET.fromstring(page).findtext('.//Result'))[0]
+            self.assertEqual(image.findtext('{*}class'), 'object.item.imageItem.photo')
+            key = expected_child
+        body = (f'<Browse><ObjectID>{dlna.token(key)}</ObjectID>'
+                '<BrowseFlag>BrowseDirectChildren</BrowseFlag></Browse>').encode()
+        status, response = directory.content_action('Browse', body)
+        self.assertEqual(status, 200)
+        photo = ET.fromstring(ET.fromstring(response).findtext('.//Result'))[0]
+        self.assertEqual(photo.findtext('{*}class'), 'object.item.imageItem.photo')
+        self.assertEqual(photo.attrib['parentID'], dlna.token(key))
+        self.assertIn('/media/0/z%20nested/deeper%20%26%20photos/photo.png', photo.findtext('{*}res'))

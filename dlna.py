@@ -285,7 +285,8 @@ class ContentDirectory:
         parent = token(key.rpartition('/')[0]) if key else '-1'
         title = html.escape(self.library.title(key))
         if self.library.is_dir(key):
-            return (f'<container id="{identifier}" parentID="{parent}" restricted="1">'
+            count = len(self.library.children(key))
+            return (f'<container id="{identifier}" parentID="{parent}" restricted="1" childCount="{count}">'
                     f'<dc:title>{title}</dc:title><upnp:class>object.container.storageFolder</upnp:class>'
                     '</container>')
         path = self.library.path(key)
