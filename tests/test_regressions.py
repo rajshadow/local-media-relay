@@ -6,8 +6,8 @@ import tempfile
 import threading
 import unittest
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from unittest.mock import MagicMock
+from pathlib import Path, PureWindowsPath
+from unittest.mock import MagicMock, patch
 
 import dlna
 from library import Library
@@ -60,6 +60,43 @@ class LibraryTests(unittest.TestCase):
         self.assertNotEqual(ET.fromstring(update).findtext('.//Id'), before)
         _, after = directory.content_action('Browse', body)
         self.assertIn('new.mp4', ET.fromstring(after).findtext('.//Result'))
+
+    def test_protected_system_folder_does_not_break_drive_root_browse(self):
+        protected = self.root / 'System Volume Information'
+        protected.mkdir()
+        (self.root / 'pictures').mkdir()
+        (self.root / 'photo.png').write_bytes(b'image')
+        scan = self.library._scan_children
+
+        def scan_with_system_permissions(path, key):
+            if path == protected:
+                raise PermissionError('Protected Windows system folder')
+            return scan(path, key)
+
+        catalog = dlna.ContentDirectory(self.library, 'http://127.0.0.1:1234', 1)
+        with patch.object(self.library, '_scan_children', side_effect=scan_with_system_permissions):
+            body = (f'<Browse><ObjectID>{dlna.token("0")}</ObjectID>'
+                    '<BrowseFlag>BrowseDirectChildren</BrowseFlag></Browse>').encode()
+            status, response = catalog.content_action('Browse', body)
+            self.assertEqual(status, 200)
+            entries = ET.fromstring(ET.fromstring(response).findtext('.//Result'))
+            self.assertEqual(len(entries), 3)
+            system = next(item for item in entries if item.findtext('{*}title') == protected.name)
+            self.assertEqual(system.attrib['childCount'], '0')
+            self.assertEqual(self.library.children('0/System Volume Information'), [])
+
+    def test_root_labels_omit_indexes_and_disambiguate_identical_names(self):
+        self.assertEqual(self.library.title('0'), self.root.name)
+        first = self.base / 'one' / 'Photos'
+        second = self.base / 'two' / 'Photos'
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        library = Library([first, second])
+        self.assertEqual(library.title('0'), str(first.resolve()))
+        self.assertEqual(library.title('1'), str(second.resolve()))
+        drive = PureWindowsPath('E:/')
+        with patch.object(self.library, 'roots', [drive]), patch.object(self.library, 'path', return_value=drive):
+            self.assertEqual(self.library.title('0'), 'E:\\')
 
 
 class ProtocolTests(unittest.TestCase):

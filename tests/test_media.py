@@ -181,3 +181,16 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(photo.findtext('{*}class'), 'object.item.imageItem.photo')
         self.assertEqual(photo.attrib['parentID'], dlna.token(key))
         self.assertIn('/media/0/z%20nested/deeper%20%26%20photos/photo.png', photo.findtext('{*}res'))
+
+    def test_browse_advertises_missing_artwork_without_starting_disk_jobs(self):
+        video = self.root / 'large-video.mp4'
+        video.write_bytes(b'video-fixture')
+        manager = ThumbnailManager(self.folder / 'lazy', self.library, ffmpeg='test-ffmpeg')
+        try:
+            directory = dlna.ContentDirectory(self.library, 'http://127.0.0.1:1234', 7, manager)
+            with patch.object(manager._executor, 'submit') as submit:
+                self.assertIn('albumArtURI', directory.didl('0/large-video.mp4'))
+                submit.assert_not_called()
+                self.assertEqual(manager._pending, set())
+        finally:
+            manager.close()

@@ -80,7 +80,8 @@ class ThumbnailManager:
     def advertise(self, source):
         if self.pre_generated(source) is not None:
             return True
-        return self.request(source) is not None or bool(self.ffmpeg)
+        # Building a catalog must not launch decoders against an HDD.
+        return self.cached_preview(source) is not None or bool(self.ffmpeg)
 
     def preview_bytes(self, source):
         image = self.pre_generated(source)
@@ -93,19 +94,29 @@ class ThumbnailManager:
             image = stream.read(MAX_THUMBNAIL_BYTES + 1)
         return image if len(image) <= MAX_THUMBNAIL_BYTES else None
 
-    def request(self, source):
-        """Return an existing preview, or queue work and return immediately."""
+    def cached_preview(self, source):
         source = Path(source)
         if not is_media(source):
             return None
         try:
             sidecar = self.sidecar(source)
-            if sidecar is not None:
-                if sidecar.stat().st_mtime_ns >= source.stat().st_mtime_ns:
-                    return sidecar
+            if sidecar is not None and sidecar.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+                return sidecar
             cache = self.cache_path(source)
-            if jpeg_preview(cache):
-                return cache
+            return cache if jpeg_preview(cache) else None
+        except (OSError, ValueError):
+            return None
+
+    def request(self, source):
+        """Queue generation only when a client requests the artwork."""
+        source = Path(source)
+        if not is_media(source):
+            return None
+        cached = self.cached_preview(source)
+        if cached is not None:
+            return cached
+        try:
+            cache = self.cache_path(source)
         except (OSError, ValueError):
             return None
         with self._lock:

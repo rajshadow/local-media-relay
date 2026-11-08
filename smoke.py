@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import os
 import socket
 import stat
 import struct
@@ -19,7 +20,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 import settings
 from dlna import token
 from relay import Relay
-from ssdp import SSDP_ADDR, lan_ip, parse_ssdp
+from ssdp import SO_REUSE_MULTICASTPORT, SSDP_ADDR, lan_ip, parse_ssdp
 from thumbnails import jpeg_preview
 
 HERE = Path(__file__).resolve().parent
@@ -153,25 +154,47 @@ def check_restricted(folders, host):
         assert request(approved.base + '/media/0/Color%20bars.mp4')[0] == 200
     finally:
         approved.stop()
-    denied = Relay(folders, host, 'uuid:' + str(uuid.uuid4()), allowed_clients=['127.0.0.2'])
-    try:
-        for path in ('/dlna/device.xml', '/media/0/Color%20bars.mp4',
-                     '/dlna/thumb/' + token('0/Color bars.mp4') + '.jpg'):
-            try:
-                request(denied.base + path, headers={'X-Forwarded-For': '127.0.0.2',
-                                                    'X-Relay-Client': '127.0.0.2'})
-            except HTTPError as error:
-                assert error.code == 403
-            else:
-                raise AssertionError('Denied client accessed a protected route')
+    # Listen as a passive player would. Even a denied HTTP peer can hear
+    # standard presence announcements in compatibility mode.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        option = SO_REUSE_MULTICASTPORT if os.name == 'nt' else socket.SO_REUSEADDR
+        listener.setsockopt(socket.SOL_SOCKET, option, 1)
+        listener.bind(('', SSDP_ADDR[1]))
+        membership = socket.inet_aton(SSDP_ADDR[0]) + socket.inet_aton(host)
+        listener.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+        listener.settimeout(0.5)
+        denied = Relay(folders, host, 'uuid:' + str(uuid.uuid4()), allowed_clients=['127.0.0.2'])
         try:
-            find_relay(denied, host, denied.udn)
-        except AssertionError as error:
-            assert str(error).startswith('No SSDP response')
-        else:
-            raise AssertionError('Discovery answered a denied client')
-    finally:
-        denied.stop()
+            deadline = time.monotonic() + 3
+            saw_announcement = False
+            while time.monotonic() < deadline:
+                try:
+                    packet, _ = listener.recvfrom(65535)
+                except TimeoutError:
+                    continue
+                headers = parse_ssdp(packet)
+                if headers.get('NTS') == 'ssdp:alive' and headers.get('USN', '').startswith(denied.udn):
+                    assert headers['LOCATION'] == denied.base + '/dlna/device.xml'
+                    saw_announcement = True
+                    break
+            assert saw_announcement, 'Restricted relay did not advertise to passive clients'
+            for path in ('/dlna/device.xml', '/media/0/Color%20bars.mp4',
+                         '/dlna/thumb/' + token('0/Color bars.mp4') + '.jpg'):
+                try:
+                    request(denied.base + path, headers={'X-Forwarded-For': '127.0.0.2',
+                                                        'X-Relay-Client': '127.0.0.2'})
+                except HTTPError as error:
+                    assert error.code == 403
+                else:
+                    raise AssertionError('Denied client accessed a protected route')
+            try:
+                find_relay(denied, host, denied.udn)
+            except AssertionError as error:
+                assert str(error).startswith('No SSDP response')
+            else:
+                raise AssertionError('Discovery answered a denied client')
+        finally:
+            denied.stop()
 
 
 def check_nested_photos(relay):
@@ -328,9 +351,13 @@ def run(folders, clip, large_files):
     finally:
         if not relay.stopped.is_set():
             relay.stop()
-    restarted = Relay(folders, host, udn)
+    restarted = Relay(folders, host, udn, generate_previews=False)
     try:
         find_relay(restarted, host, udn)
+        assert restarted.thumbnails.ffmpeg is None
+        if restarted.thumbnails.cache_path(CLIP).is_file():
+            thumbnail = restarted.base + '/dlna/thumb/' + token('0/Color bars.mp4') + '.jpg'
+            assert request(thumbnail)[2].startswith(b'\xff\xd8')
     finally:
         restarted.stop()
     assert CLIP.read_bytes() == original

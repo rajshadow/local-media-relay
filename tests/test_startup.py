@@ -31,3 +31,11 @@ class StartupTests(unittest.TestCase):
                     http.return_value.server_close.assert_called_once()
                     http.return_value.shutdown.assert_not_called()
                     previews.return_value.close.assert_called_once()
+
+    def test_generation_can_be_disabled_at_the_session_entry_point(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(settings, 'APP_DIR', Path(directory)):
+            with patch('relay.ThumbnailManager') as previews, patch('relay.HttpServer', side_effect=OSError('cannot bind')):
+                with self.assertRaises(OSError):
+                    Relay([directory], '127.0.0.1', 'uuid:test', generate_previews=False)
+                self.assertIsNone(previews.call_args.kwargs['ffmpeg'])
+                previews.return_value.close.assert_called_once()

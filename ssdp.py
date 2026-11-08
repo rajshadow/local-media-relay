@@ -52,19 +52,10 @@ class Discovery:
         self.thread.start()
 
     def announce(self, kind):
-        allowed = getattr(self, 'allowed_clients', None)
-        destinations = (SSDP_ADDR,) if allowed is None else tuple((host, SSDP_ADDR[1]) for host in allowed)
+        # Passive DLNA clients can require standard multicast announcements.
+        # Access to descriptions and media is independently gated by Caddy.
         for target, usn in self.targets:
-            packet = ssdp_notify(self.base, self.boot_id, target, usn, kind)
-            for destination in destinations:
-                try:
-                    self.sender.sendto(packet, destination)
-                except OSError:
-                    if allowed is None:
-                        raise
-                    # One offline or unroutable approved address must not stop
-                    # discovery for the other players.
-                    continue
+            self.sender.sendto(ssdp_notify(self.base, self.boot_id, target, usn, kind), SSDP_ADDR)
 
     def run(self):
         with self.receiver, self.sender:

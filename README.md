@@ -8,13 +8,15 @@ You’ll need Python 3.11+ with Tkinter and `pythonw.exe` on PATH, plus Caddy. P
 
 Open **Start Local Media Relay.cmd**, add folders, and click **Start sharing**. On the player, look for **Local Media Relay** under network media sources. Folder selections are saved for the next launch. The `fixtures/` folders contain two short test clips.
 
-Use a trusted LAN. Sharing is open to reachable clients by default. To restrict it, enable **Only these IPv4 addresses** and enter the players’ addresses before starting. This filters discovery, browsing, thumbnails, and playback. Access settings save on Start.
+Use a trusted LAN. Sharing is open to reachable clients by default. To restrict it, enable **Only these IPv4 addresses** and enter the players’ addresses before starting. This restricts browsing, thumbnails, and playback. Server presence is still announced across the LAN for TV compatibility. Access settings save on Start.
 
 **Previously seen clients** lists addresses from recent access logs, with this PC excluded and one row per IP, a device guess, reported client strings, activity seen, and last-seen time. Connect a player while sharing, then refresh the list. Stop sharing, select entries, and click **Add selected IPs** to prepare the allowlist for the next Start. The activity column distinguishes description fetching, library requests, and media requests. It uses up to 30 days of recent log tails. Addresses and reported names can change.
 
-JPEG and PNG photos are supported. If ffmpeg is on PATH, previews are generated in the background and cached under `%LOCALAPPDATA%\Local Media Relay\thumbnails`. To supply your own preview, put a JPEG named `movie.mp4.thumb.jpg` beside `movie.mp4` (or `photo.png.thumb.jpg` beside a photo). It must be newer than the source and at most 2 MiB.
+JPEG and PNG photos are supported. If ffmpeg is on PATH, missing previews are generated when the player requests artwork and cached under `%LOCALAPPDATA%\Local Media Relay\thumbnails`. To supply your own preview, put a JPEG named `movie.mp4.thumb.jpg` beside `movie.mp4` (or `photo.png.thumb.jpg` beside a photo). It must be newer than the source and at most 2 MiB.
 
 Existing `thumbs_*.json` maps are also read from image folders. The newest map can contain filename-to-base64-JPEG entries or `data:image/jpeg;base64,...` values. Maps and source files are matched case-insensitively. Keep the map newer than its source images; maps over 64 MiB fall back to normal preview generation. Shared caches reuse parsed maps, decoded previews and directory listings, with changes checked within two seconds.
+
+For HDD playback comparisons, clear **Generate missing previews** before Start. Cached and pre-generated previews remain available. Browsing the catalog itself never starts a decoder.
 
 Compatible Samsung-style DLNA players can save and read resume positions. Checkpoints are stored per file and client IP. Player support, IP changes, and real-device seek behavior still need checking.
 

@@ -48,17 +48,21 @@ class App:
         self.restrict_control.grid(row=4, column=0, sticky='w', pady=(8, 0))
         self.clients_entry = ttk.Entry(panel, textvariable=self.client_ips, width=44)
         self.clients_entry.grid(row=4, column=1, columnspan=2, sticky='ew', pady=(8, 0))
-        ttk.Label(panel, text='Separate addresses with commas. Access settings save when sharing starts.').grid(
+        ttk.Label(panel, text='Access settings save on Start. Server presence is announced to the LAN.').grid(
             row=5, columnspan=3, sticky='w')
+        self.generate_previews = tk.BooleanVar(value=True)
+        self.preview_control = ttk.Checkbutton(
+            panel, text='Generate missing previews (uses disk and CPU)', variable=self.generate_previews)
+        self.preview_control.grid(row=6, columnspan=3, sticky='w', pady=(4, 0))
         self.toggle_button = ttk.Button(panel, text='Start sharing', command=self.toggle)
-        self.toggle_button.grid(row=6, sticky='w', pady=10)
-        ttk.Button(panel, text='Open logs', command=self.open_logs).grid(row=6, column=1, sticky='w')
+        self.toggle_button.grid(row=7, sticky='w', pady=10)
+        ttk.Button(panel, text='Open logs', command=self.open_logs).grid(row=7, column=1, sticky='w')
         self.status = tk.StringVar(value='Stopped')
-        ttk.Label(panel, textvariable=self.status, wraplength=520).grid(row=7, columnspan=3, sticky='w')
+        ttk.Label(panel, textvariable=self.status, wraplength=520).grid(row=8, columnspan=3, sticky='w')
         ttk.Label(panel, text='Open network media sources in your DLNA player.').grid(
-            row=8, columnspan=3, sticky='w', pady=(8, 0))
+            row=9, columnspan=3, sticky='w', pady=(8, 0))
         history = ttk.LabelFrame(panel, text='Previously seen clients', padding=8)
-        history.grid(row=9, columnspan=3, sticky='ew', pady=(12, 0))
+        history.grid(row=10, columnspan=3, sticky='ew', pady=(12, 0))
         self.clients = ttk.Treeview(
             history, columns=('ip', 'guess', 'activity', 'seen'), show='headings', height=5,
             selectmode='extended',
@@ -101,6 +105,7 @@ class App:
             addresses = settings.load_access()
             self.restricted.set(addresses is not None)
             self.client_ips.set(', '.join(addresses or ()))
+            self.generate_previews.set(settings.load_preview_generation())
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self.restricted.set(True)
             self.status.set(f'Could not load settings: {exc}')
@@ -225,12 +230,14 @@ class App:
             addresses = allowed_addresses(self.client_ips.get()) if self.restricted.get() else None
             settings.save(folders, self.udn)
             settings.save_access(addresses)
-            self.relay = Relay(folders, str(host), self.udn, allowed_clients=addresses)
+            settings.save_preview_generation(self.generate_previews.get())
+            self.relay = Relay(folders, str(host), self.udn, allowed_clients=addresses,
+                               generate_previews=self.generate_previews.get())
         except (OSError, ValueError) as exc:
             messagebox.showerror('Could not start sharing', str(exc), parent=self.window)
             return
         self.toggle_button.config(text='Stop sharing')
-        for control in (self.add, self.remove, self.address, self.restrict_control, self.clients_entry):
+        for control in (self.add, self.remove, self.address, self.restrict_control, self.clients_entry, self.preview_control):
             control.config(state='disabled')
         self.select_client()
         self.update_status()
@@ -252,7 +259,7 @@ class App:
         self.relay.stop()
         self.relay = None
         self.toggle_button.config(text='Start sharing')
-        for control in (self.add, self.remove, self.address, self.restrict_control):
+        for control in (self.add, self.remove, self.address, self.restrict_control, self.preview_control):
             control.config(state='normal')
         self.update_access_controls()
         self.status.set('Stopped')

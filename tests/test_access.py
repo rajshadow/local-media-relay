@@ -54,7 +54,7 @@ class AccessTests(unittest.TestCase):
         unrestricted = Caddy.config('192.168.1.2', 12345, 12346)
         self.assertNotIn('@blocked', unrestricted)
 
-    def test_restricted_discovery_only_replies_to_approved_peers(self):
+    def test_restricted_search_replies_only_to_approved_peers(self):
         session = Discovery.__new__(Discovery)
         session.receiver = MagicMock()
         session.sender = MagicMock()
@@ -79,11 +79,11 @@ class AccessTests(unittest.TestCase):
         self.assertIsNone(session.error)
         destinations = [args[1] for args, _ in session.sender.sendto.call_args_list]
         self.assertIn(('192.168.1.3', 12345), destinations)
-        self.assertTrue(all(destination[0] == '192.168.1.3' for destination in destinations))
-        self.assertNotIn(SSDP_ADDR, destinations)
+        self.assertNotIn(('192.168.1.4', 12345), destinations)
+        self.assertTrue(all(destination == SSDP_ADDR or destination[0] == '192.168.1.3'
+                            for destination in destinations))
 
-
-    def test_restricted_announcements_go_only_to_approved_devices(self):
+    def test_restricted_announcements_use_standard_multicast(self):
         session = Discovery.__new__(Discovery)
         session.allowed_clients = ('192.168.1.3', '192.168.1.5')
         session.sender = MagicMock()
@@ -94,20 +94,19 @@ class AccessTests(unittest.TestCase):
             session.sender.reset_mock()
             session.announce(kind)
             calls = session.sender.sendto.call_args_list
-            self.assertEqual([call.args[1] for call in calls],
-                             [('192.168.1.3', 1900), ('192.168.1.5', 1900)])
-            self.assertTrue(all(kind.encode() in call.args[0] for call in calls))
+            self.assertEqual([call.args[1] for call in calls], [SSDP_ADDR])
+            self.assertIn(kind.encode(), calls[0].args[0])
+            self.assertNotIn(b'192.168.1.3', calls[0].args[0])
 
-    def test_offline_approved_peer_does_not_prevent_other_announcements(self):
-        session = Discovery.__new__(Discovery)
-        session.allowed_clients = ('192.168.1.3', '192.168.1.5')
-        session.sender = MagicMock()
-        session.targets = [('upnp:rootdevice', 'uuid:test::upnp:rootdevice')]
-        session.base = 'http://192.168.1.2:1234'
-        session.boot_id = 1
-        for error in (ConnectionResetError(), OSError(10049, 'unroutable address')):
-            with self.subTest(error=type(error).__name__):
-                session.sender.reset_mock()
-                session.sender.sendto.side_effect = [error, None]
-                session.announce('ssdp:alive')
-                self.assertEqual(session.sender.sendto.call_count, 2)
+    def test_preview_preference_preserves_folders_and_access_settings(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(settings, 'STATE', Path(directory) / 'settings.json'):
+            udn = 'uuid:7d147f76-b681-4e5b-a665-bbf357e40cc9'
+            settings.save(['media'], udn)
+            settings.save_access(('192.168.1.8',))
+            self.assertTrue(settings.load_preview_generation())
+            settings.save_preview_generation(False)
+            self.assertFalse(settings.load_preview_generation())
+            self.assertEqual(settings.load(), (['media'], udn))
+            self.assertEqual(settings.load_access(), ('192.168.1.8',))
+            with self.assertRaises(ValueError):
+                settings.save_preview_generation('false')

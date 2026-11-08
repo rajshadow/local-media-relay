@@ -58,3 +58,20 @@ def save_access(allowed_clients):
     data.setdefault('udn', 'uuid:' + str(uuid.uuid4()))
     data['allowed_clients'] = addresses
     write_settings(data)
+
+
+def load_preview_generation():
+    value = read_settings().get('generate_previews', True)
+    if not isinstance(value, bool):
+        raise ValueError('Invalid preview-generation setting.')
+    return value
+
+
+def save_preview_generation(enabled):
+    if not isinstance(enabled, bool):
+        raise ValueError('Preview-generation setting must be true or false.')
+    data = read_settings()
+    data.setdefault('folders', [])
+    data.setdefault('udn', 'uuid:' + str(uuid.uuid4()))
+    data['generate_previews'] = enabled
+    write_settings(data)

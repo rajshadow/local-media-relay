@@ -13,7 +13,7 @@ from caddy_backend import Caddy
 from checkpoints import Checkpoints
 from library import Library, is_media
 from ssdp import Discovery
-from thumbnails import ThumbnailManager
+from thumbnails import AUTO_FFMPEG, ThumbnailManager
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -132,7 +132,7 @@ class HttpServer(ThreadingHTTPServer):
 
 
 class Relay:
-    def __init__(self, folders, host, udn, allowed_clients=None):
+    def __init__(self, folders, host, udn, allowed_clients=None, generate_previews=True):
         self.library = Library(folders)
         self.stopped = threading.Event()
         self.udn = udn
@@ -142,7 +142,8 @@ class Relay:
         self.http_thread = None
         boot_id = int(time.time())
         try:
-            self.thumbnails = ThumbnailManager(settings.APP_DIR / 'thumbnails', self.library)
+            self.thumbnails = ThumbnailManager(settings.APP_DIR / 'thumbnails', self.library,
+                                               ffmpeg=AUTO_FFMPEG if generate_previews else None)
             self.http = HttpServer(('127.0.0.1', 0), Handler)
             self.http.relay = self
             self.http_thread = threading.Thread(target=self.http.serve_forever, args=(0.1,), daemon=True)
